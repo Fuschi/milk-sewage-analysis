@@ -4,23 +4,52 @@ format: html
 editor: source
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
-```{r}
-1 + 1
+```{r, message=FALSE}
+library(tidyverse)
+metasample <- read_tsv("../results/samples.tsv", col_types = list(sample_id = col_factor()))
 ```
 
-You can add options to executable code like this
-
-```{r}
-#| echo: false
-2 * 2
+```{r, message=FALSE}
+kneaddata <- read_tsv("../results/kneaddata_read_counts.tsv",
+                      col_types = list(Sample = col_factor())) %>%
+  rename(sample_id = Sample) %>%
+  left_join(metasample, by = "sample_id") %>%
+  relocate(biome, .after = 1)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+```{r}
+knead_plot <- kneaddata %>%
+  transmute(
+    sample_id, biome,
+    raw_reads = `raw pair1` + `raw pair2`,
+    trimmed_reads = `trimmed pair1` + `trimmed pair2` + `trimmed orphan1` + `trimmed orphan2`,
+    decontaminated_reads = `decontaminated bosTau9 pair1` + `decontaminated bosTau9 pair2` +
+      `decontaminated bosTau9 orphan1` + `decontaminated bosTau9 orphan2`,
+    saved_reads = `final pair1` + `final pair2` + `final orphan1` + `final orphan2`) %>%
+  mutate(
+    bos_taurus_reads = trimmed_reads - decontaminated_reads,
+    other_removed_reads = raw_reads - bos_taurus_reads - saved_reads) %>%
+  select(sample_id, biome, saved_reads, other_removed_reads, bos_taurus_reads) %>%
+  pivot_longer(-c(sample_id, biome), names_to = "read_type", values_to = "reads") %>%
+  mutate(
+    read_type = factor(read_type, levels = c("saved_reads", "other_removed_reads", "bos_taurus_reads"),
+                       labels = c("saved", "trimmed", "bos taurus")),
+    biome = factor(biome, levels = c("milk", "sewage")),
+    sample_id = fct_rev(factor(sample_id)))
+```
+
+
+```{r, fig.width=9, fig.height=5}
+p_knead <- ggplot(knead_plot, aes(reads, sample_id, fill = read_type)) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  facet_wrap(~biome, nrow = 1, scales = "free_y") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_fill_manual(breaks = c("saved", "trimmed", "bos taurus"),
+                    values = c("saved" = "#3b82a0", "trimmed" = "#bdbdbd", "bos taurus" = "#e69f00")) +
+  labs(x = "total raw reads", y = "sample", fill = "read category",
+       title = "raw reads by processing outcome") +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+p_knead
+```
+
