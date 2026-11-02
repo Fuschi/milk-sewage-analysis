@@ -7,8 +7,8 @@ trap 'rm -rf "$tmp"' EXIT
 git clone --quiet --depth 1 --branch main \
     https://github.com/Fuschi/milk-sewage-wgs.git "$tmp/workflow"
 
-mkdir -p results
+mkdir -p data
 
-rsync -av --delete "$tmp/workflow/results/" results/
+rsync -av --delete "$tmp/workflow/results/" data/
 
-cp "$tmp/workflow/config/samples.tsv" results/samples.tsv
+cp "$tmp/workflow/config/samples.tsv" data/samples.tsv
