@@ -351,57 +351,104 @@ p_mags_relative
 
 ### mags functional profiling
 
-AMR and virulence-associated genes were identified in reconstructed MAGs using ABRicate with ResFinder and VFDB. Gene detections were linked to GTDB-Tk and NCBI taxonomy and MAG quality estimates.
+AMR and virulence-associated genes were screened in reconstructed MAGs using ABRicate with ResFinder and VFDB. Detected genes were linked to GTDB-Tk and NCBI classifications and genome quality estimates. Gene detection does not necessarily indicate pathogenicity.
 
 ```{r, message=FALSE}
 ncbi <- read_tsv("../data/ncbi_taxonomy.tsv", show_col_types = FALSE)
-
-read_abricate <- function(database, file) {
-  read_tsv(paste0("../data/", file), show_col_types = FALSE) %>%
-    transmute(mag_id = str_remove(`#FILE`, "\\.(fa|fna|fasta)(\\.gz)?$"),
-              database, gene = GENE, identity = `%IDENTITY`, coverage = `%COVERAGE`, product = PRODUCT)
-}
+amr_meta <- read_tsv("../data/resfinder_metadata.tsv", show_col_types = FALSE) %>%
+  select(gene_id, category = antibiotic_class) %>% distinct()
+vfdb_meta <- read_tsv("../data/vfdb_metadata.tsv", show_col_types = FALSE) %>%
+  select(gene_id, category = vf_category) %>% distinct()
 
 mag_genes <- bind_rows(
-  read_abricate("AMR", "abricate_resfinder_2.6.0.tsv"),
-  read_abricate("VFDB", "abricate_vfdb_2026-10-26.tsv")
-)
-
-mag_hits <- mag_genes %>%
-  count(mag_id, database, name = "n_hits") %>%
-  pivot_wider(names_from = database, values_from = n_hits, values_fill = 0, names_prefix = "n_")
-
-mags_profile <- mags_info %>%
-  left_join(ncbi %>% select(mag_id, starts_with("ncbi_")), by = "mag_id") %>%
-  left_join(mag_hits, by = "mag_id") %>%
-  mutate(across(c(n_AMR, n_VFDB), ~replace_na(.x, 0L)))
+  read_tsv("../data/abricate_resfinder_2.6.0.tsv", show_col_types = FALSE) %>%
+    mutate(database = "AMR") %>% left_join(amr_meta, by = c("GENE" = "gene_id")),
+  read_tsv("../data/abricate_vfdb_2026-10-26.tsv", show_col_types = FALSE) %>%
+    mutate(database = "VFDB") %>% left_join(vfdb_meta, by = c("GENE" = "gene_id"))
+) %>%
+  transmute(mag_id = str_remove(basename(`#FILE`), "\\.(fa|fna|fasta)(\\.gz)?$"),
+            database, gene = GENE, category = replace_na(category, "unclassified"),
+            identity = `%IDENTITY`, coverage = `%COVERAGE`) %>%
+  distinct()
 ```
 
-#### MAGs with AMR or virulence genes
+#### MAGs with detected genes
 
 ```{r}
-mags_profile %>%
-  filter(n_AMR > 0 | n_VFDB > 0) %>%
-  select(mag_id, domain, genus, species, ncbi_most_specific, quality,
-         completeness, contamination, n_AMR, n_VFDB) %>%
-  arrange(desc(n_VFDB), desc(n_AMR))
+mag_summary <- mag_genes %>%
+  group_by(mag_id, database) %>%
+  summarise(n_genes = n_distinct(gene), genes = paste(sort(unique(gene)), collapse = ", "), .groups = "drop") %>%
+  pivot_wider(names_from = database, values_from = c(n_genes, genes), values_fill = list(n_genes = 0, genes = "")) %>%
+  left_join(mags_info %>% select(mag_id, species, quality, completeness, contamination), by = "mag_id") %>%
+  left_join(ncbi %>% select(mag_id, ncbi_most_specific), by = "mag_id")
+
+mag_summary %>%
+  select(mag_id, species, ncbi_most_specific, quality, completeness, contamination,
+         n_genes_AMR, genes_AMR, n_genes_VFDB, genes_VFDB) %>%
+  arrange(desc(n_genes_VFDB), desc(n_genes_AMR))
 ```
 
-#### Identified genes
+#### AMR and virulence gene distribution
 
 ```{r}
-mag_genes %>%
-  left_join(mags_profile %>% select(mag_id, genus, species, ncbi_most_specific), by = "mag_id") %>%
-  select(mag_id, database, gene, identity, coverage, genus, species, ncbi_most_specific, product) %>%
-  arrange(database, mag_id)
+plot_genes <- mag_genes %>%
+  left_join(mags_info %>% select(mag_id, species, genus), by = "mag_id") %>%
+  left_join(ncbi %>% select(mag_id, ncbi_most_specific), by = "mag_id") %>%
+  mutate(classification = coalesce(ncbi_most_specific, species, genus, "unclassified"),
+         mag_label = paste0(mag_id, " | ", classification),
+         gene_label = paste(database, gene, sep = ": ")) %>%
+  distinct(mag_id, mag_label, database, gene_label, category)
+
+amr_matrix <- plot_genes %>%
+  filter(database == "AMR") %>%
+  mutate(present = 1L) %>%
+  select(mag_id, gene_label, present) %>%
+  pivot_wider(names_from = gene_label, values_from = present, values_fill = 0) %>%
+  column_to_rownames("mag_id") %>% as.matrix()
+
+mag_order <- rownames(amr_matrix)[hclust(dist(amr_matrix, method = "binary"), method = "average")$order]
+mag_order <- c(mag_order, setdiff(unique(plot_genes$mag_id), mag_order))
+
+mag_labels <- plot_genes %>% distinct(mag_id, mag_label) %>%
+  slice(match(mag_order, mag_id)) %>% pull(mag_label)
+
+gene_order <- plot_genes %>% count(database, category, gene_label, sort = TRUE) %>%
+  arrange(database, category, desc(n)) %>% pull(gene_label)
+
+plot_genes <- plot_genes %>%
+  mutate(mag_label = factor(mag_label, levels = rev(mag_labels)),
+         gene_label = factor(gene_label, levels = gene_order))
 ```
 
-#### Summary
+```{r, fig.width=11, fig.height=8}
+#| label: fig-mag-genes
+#| fig-cap: "Distribution of AMR and virulence-associated genes across reconstructed MAGs. Colors indicate functional categories; MAG labels include the most specific available taxonomic classification."
 
-```{r}
-mags_profile %>%
-  mutate(status = case_when(n_AMR > 0 & n_VFDB > 0 ~ "AMR + VFDB",
-                            n_AMR > 0 ~ "AMR only", n_VFDB > 0 ~ "VFDB only",
-                            TRUE ~ "no hits")) %>%
-  count(domain, status)
+p_mag_genes <- ggplot(plot_genes, aes(gene_label, mag_label)) +
+  geom_tile(aes(fill = category), color = "white", linewidth = 0.3) +
+  facet_grid(~database, scales = "free_x", space = "free_x") +
+  ggqualpal::scale_fill_qualpal() +
+  labs(x = "gene", y = "MAG | taxonomic classification", fill = "category") +
+  theme_bw() +
+  theme(panel.grid.major = element_line(color = "grey85", linewidth = 0.3),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 7),
+        axis.text.y = element_text(size = 7)) +
+  theme(legend.position = "bottom")
+
+ggsave("../results/mag_genes.png", p_mag_genes, width = 14, height = 6, dpi = 300)
+p_mag_genes
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+
